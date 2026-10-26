@@ -36,7 +36,8 @@
 - **Hiding podcasts, episodes, and audiobooks** from the homepage (optional)
 - **Block Spotify automatic updates** (optional)
 - **Some native experimental features have been changed**
-- **Analytics sending has been disabled** 
+- **Analytics sending has been disabled**
+- **Version reports are opt-in:** only sent when you pass `-sendversion_on`
 - **Advanced installation [parameters](https://github.com/SpotX-Official/SpotX/discussions/60)**
 
 <h1 id="installation--update">Installation / Update</h1>
@@ -178,6 +179,8 @@ You can specify various parameters for a more flexible installation, more [detai
 <h1 id="uninstall">Uninstall</h1>
 
 - Just run [Uninstall.bat](https://raw.githack.com/amd64fox/SpotX/main/Uninstall.bat)
+
+- For a custom install directory: `Uninstall.bat "D:\Spotify"` (or `Uninstall.bat -SpotifyPath "D:\Spotify"`)
 
 or
 

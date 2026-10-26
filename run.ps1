@@ -119,8 +119,11 @@ param
     [Parameter(HelpMessage = 'Do not create desktop shortcut.')]
     [switch]$no_shortcut,
 
-    [Parameter(HelpMessage = 'Disable sending new versions')]
+    [Parameter(HelpMessage = 'Deprecated. Version reporting is off by default.')]
     [switch]$sendversion_off,
+
+    [Parameter(HelpMessage = 'Opt in to sending anonymous new-version reports.')]
+    [switch]$sendversion_on,
 
     [Parameter(HelpMessage = 'Static color for lyrics.')]
     [ArgumentCompleter({ param($cmd, $param, $wordToComplete)
@@ -200,7 +203,7 @@ function Format-LanguageCode {
             $returnCode = 'fa'
             break
         }
-        '^fi$' {
+        '^fi(?!l)' {
             $returnCode = 'fi'
             break
         }
@@ -268,7 +271,7 @@ function Format-LanguageCode {
             $returnCode = 'sk'
             break
         }
-        '^(sr|sr-Cyrl)$' {
+        '^sr(?!-Latn)' {
             $returnCode = 'sr'
             break
         }
@@ -296,7 +299,7 @@ function Format-LanguageCode {
             $returnCode = 'vi'
             break
         }
-        '^(zh|zh-CN)$' {
+        '^zh(?!-TW)' {
             $returnCode = 'zh'
             break
         }
@@ -362,6 +365,8 @@ $css = $null
 $calltype = $null
 $tempDirectory = $null
 $script:curlSupportsFailWithBody = $null
+$script:patchMisses = 0
+$defenderRecordPath = Join-Path $env:LOCALAPPDATA 'SpotX\defender-exclusions.txt'
 
 # Check version Powershell
 $psv = $PSVersionTable.PSVersion.major
@@ -392,7 +397,7 @@ function Stop-Script {
             }
         }
     }
-    Exit
+    Exit 1
 }
 
 function Stop-BrokenSpotifyFiles {
@@ -619,6 +624,33 @@ function Resolve-SpotifyInstallerVersionFromManifest {
     return $fullVersion
 }
 
+function Get-SpotifyInstallerManifestUrl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FullVersion,
+        [Parameter(Mandatory = $true)]
+        [string]$Architecture
+    )
+
+    try {
+        if ($null -eq $script:spotifyVersionsManifest) {
+            $script:spotifyVersionsManifest = Get-SpotifyVersionsManifest -Url $spotifyVersionsManifestUrl
+        }
+        $entry = @($script:spotifyVersionsManifest.PSObject.Properties |
+            Where-Object { $_.Value.fullversion -eq $FullVersion } |
+            Select-Object -First 1)
+        if ($entry.Count -eq 0) { return $null }
+        $asset = $entry[0].Value.win.PSObject.Properties[$Architecture]
+        if ($null -eq $asset) { return $null }
+        return [string]$asset.Value.url
+    }
+    catch {
+        Write-Verbose "Could not resolve the installer URL from the versions manifest: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# shortcut: all installers still come from the same worker host; add a real mirror if one exists.
 $spotifyDownloadBaseUrl = "https://loadspot.amd64fox1.workers.dev/download"
 $spotifyTemporaryDownloadBaseUrl = "https://loadspot.amd64fox1.workers.dev/temporary-download"
 $spotifyTemporaryDownloadVersion = "1.2.86.502.g8cd7fb22"
@@ -1269,10 +1301,8 @@ function Invoke-SpotifyDownloadAttempt {
             $curlOutput = & curl.exe `
                 -q `
                 -L `
-                -k `
                 $curlFailOption `
                 --connect-timeout 15 `
-                --ssl-no-revoke `
                 --progress-bar `
                 -o $DestinationPath `
                 -w "`nHTTP_STATUS:%{http_code}`n" `
@@ -1402,12 +1432,14 @@ function downloadSp([string]$DownloadFolder) {
         -SpotifyVersion $spotifyVersion `
         -LastX86SupportedVersion $last_x86
 
-    $downloadBaseUrl = $spotifyDownloadBaseUrl
-    if ($downloadVersion -eq $spotifyTemporaryDownloadVersion -and $arch -eq 'x64') {
-        $downloadBaseUrl = $spotifyTemporaryDownloadBaseUrl
+    $web_Url = Get-SpotifyInstallerManifestUrl -FullVersion $downloadVersion -Architecture $arch
+    if (-not $web_Url) {
+        $downloadBaseUrl = $spotifyDownloadBaseUrl
+        if ($downloadVersion -eq $spotifyTemporaryDownloadVersion -and $arch -eq 'x64') {
+            $downloadBaseUrl = $spotifyTemporaryDownloadBaseUrl
+        }
+        $web_Url = "$downloadBaseUrl/spotify_installer-$downloadVersion-$arch.exe"
     }
-
-    $web_Url = "$downloadBaseUrl/spotify_installer-$downloadVersion-$arch.exe"
     $local_Url = Join-Path $DownloadFolder 'SpotifySetup.exe'
     $web_name_file = "SpotifySetup.exe"
     try {
@@ -1575,35 +1607,53 @@ function ConvertTo-PowerShellStringLiteral {
     return "'$escapedValue'"
 }
 
+function Save-DefenderExclusionRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string[]]$Path
+    )
+
+    $recordDirectory = Split-Path -Parent $defenderRecordPath
+    if (-not (Test-Path -LiteralPath $recordDirectory)) {
+        $null = New-Item -ItemType Directory -Path $recordDirectory -Force -ErrorAction Stop
+    }
+
+    $existing = @()
+    if (Test-Path -LiteralPath $defenderRecordPath) {
+        $existing = @(Get-Content -LiteralPath $defenderRecordPath -ErrorAction Stop | Where-Object { $_ })
+    }
+    $all = @($existing + $Path | Where-Object { $_ } | Sort-Object -Unique)
+    [IO.File]::WriteAllLines($defenderRecordPath, $all, [Text.UTF8Encoding]::new($false))
+}
+
 function Add-SpotifyDefenderExclusions {
     param (
         [Parameter(Mandatory = $true)]
-        [string[]]$Path,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$ProcessPath
+        [string[]]$Path
     )
 
     [string[]]$paths = @(ConvertTo-DefenderExclusionPath -Path $Path)
-    [string[]]$processPaths = @(ConvertTo-DefenderExclusionPath -Path $ProcessPath)
-    if ($paths.Count -eq 0 -and $processPaths.Count -eq 0) { return }
+    if ($paths.Count -eq 0) { return }
 
     $defenderPrompt = $lang.DefenderPrompt
     $defenderAdded = $lang.DefenderAdded
 
     try {
-        $isAdministrator = Test-IsAdministrator
+        if ($env:CI -eq 'true') { return }
+        try { $isInputRedirected = [Console]::IsInputRedirected }
+        catch { $isInputRedirected = $false }
+        if ($isInputRedirected) { return }
 
-        if (-not $isAdministrator) {
-            do {
-                $defenderChoice = Read-Host -Prompt $defenderPrompt
-                Write-Host
-                if ($defenderChoice -notmatch '^y$|^n$') { incorrectValue }
-            }
-            while ($defenderChoice -notmatch '^y$|^n$')
-
-            if ($defenderChoice -eq 'n') { return }
+        do {
+            $defenderChoice = Read-Host -Prompt $defenderPrompt
+            Write-Host
+            if ($defenderChoice -notmatch '^y$|^n$') { incorrectValue }
         }
+        while ($defenderChoice -notmatch '^y$|^n$')
+
+        if ($defenderChoice -eq 'n') { return }
+
+        $isAdministrator = Test-IsAdministrator
 
         if ($isAdministrator) {
             $modulePath = [IO.Path]::Combine(
@@ -1613,25 +1663,22 @@ function Add-SpotifyDefenderExclusions {
             $null = Import-Module -Name $modulePath -Force -ErrorAction Stop
             $preferences = Defender\Get-MpPreference -ErrorAction Stop
             $currentPaths = @($preferences.ExclusionPath)
-            $currentProcessPaths = @($preferences.ExclusionProcess)
             $missingPaths = @($paths | Where-Object { $_ -notin $currentPaths })
-            $missingProcessPaths = @($processPaths | Where-Object { $_ -notin $currentProcessPaths })
+            if ($missingPaths.Count -eq 0) {
+                Write-Host $defenderAdded
+                Write-Host
+                return
+            }
 
-            if ($missingPaths.Count -gt 0) {
-                $null = Defender\Add-MpPreference -ExclusionPath $missingPaths -Force -ErrorAction Stop
-            }
-            if ($missingProcessPaths.Count -gt 0) {
-                $null = Defender\Add-MpPreference -ExclusionProcess $missingProcessPaths -Force -ErrorAction Stop
-            }
+            Save-DefenderExclusionRecord -Path $missingPaths
+            $null = Defender\Add-MpPreference -ExclusionPath $missingPaths -Force -ErrorAction Stop
 
             $verified = $false
             for ($attempt = 0; $attempt -lt 5; $attempt++) {
                 $updatedPreferences = Defender\Get-MpPreference -ErrorAction Stop
                 $updatedPaths = @($updatedPreferences.ExclusionPath)
-                $updatedProcessPaths = @($updatedPreferences.ExclusionProcess)
-                $remainingPaths = @($paths | Where-Object { $_ -notin $updatedPaths })
-                $remainingProcessPaths = @($processPaths | Where-Object { $_ -notin $updatedProcessPaths })
-                if ($remainingPaths.Count -eq 0 -and $remainingProcessPaths.Count -eq 0) {
+                $remainingPaths = @($missingPaths | Where-Object { $_ -notin $updatedPaths })
+                if ($remainingPaths.Count -eq 0) {
                     $verified = $true
                     break
                 }
@@ -1649,31 +1696,29 @@ function Add-SpotifyDefenderExclusions {
         $pathLiterals = @($paths | ForEach-Object {
                 ConvertTo-PowerShellStringLiteral -Value $_
             }) -join ', '
-        $processPathLiterals = @($processPaths | ForEach-Object {
-                ConvertTo-PowerShellStringLiteral -Value $_
-            }) -join ', '
+        $recordPathLiteral = ConvertTo-PowerShellStringLiteral -Value $defenderRecordPath
         $command = @(
             "`$ErrorActionPreference = 'Stop';"
             'try {'
             "[string[]]`$paths = @($pathLiterals);"
-            "[string[]]`$processPaths = @($processPathLiterals);"
+            "[string]`$recordPath = $recordPathLiteral;"
             "`$modulePath = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules\Defender\Defender.psd1');"
             '$null = Import-Module -Name $modulePath -Force -ErrorAction Stop;'
             '$preferences = Defender\Get-MpPreference -ErrorAction Stop;'
             '$currentPaths = @($preferences.ExclusionPath);'
-            '$currentProcessPaths = @($preferences.ExclusionProcess);'
             '$missingPaths = @($paths | Where-Object { $_ -notin $currentPaths });'
-            '$missingProcessPaths = @($processPaths | Where-Object { $_ -notin $currentProcessPaths });'
-            'if ($missingPaths.Count -gt 0) { $null = Defender\Add-MpPreference -ExclusionPath $missingPaths -Force -ErrorAction Stop };'
-            'if ($missingProcessPaths.Count -gt 0) { $null = Defender\Add-MpPreference -ExclusionProcess $missingProcessPaths -Force -ErrorAction Stop };'
+            'if ($missingPaths.Count -gt 0) {'
+            '$recordDirectory = Split-Path -Parent $recordPath;'
+            'if (-not (Test-Path -LiteralPath $recordDirectory)) { $null = New-Item -ItemType Directory -Path $recordDirectory -Force -ErrorAction Stop };'
+            '[IO.File]::WriteAllLines($recordPath, [string[]]$missingPaths, [Text.UTF8Encoding]::new($false));'
+            '$null = Defender\Add-MpPreference -ExclusionPath $missingPaths -Force -ErrorAction Stop'
+            '};'
             '$verified = $false;'
             'for ($attempt = 0; $attempt -lt 5; $attempt++) {'
             '$updatedPreferences = Defender\Get-MpPreference -ErrorAction Stop;'
             '$updatedPaths = @($updatedPreferences.ExclusionPath);'
-            '$updatedProcessPaths = @($updatedPreferences.ExclusionProcess);'
-            '$remainingPaths = @($paths | Where-Object { $_ -notin $updatedPaths });'
-            '$remainingProcessPaths = @($processPaths | Where-Object { $_ -notin $updatedProcessPaths });'
-            'if ($remainingPaths.Count -eq 0 -and $remainingProcessPaths.Count -eq 0) { $verified = $true; break };'
+            '$remainingPaths = @($missingPaths | Where-Object { $_ -notin $updatedPaths });'
+            'if ($remainingPaths.Count -eq 0) { $verified = $true; break };'
             'if ($attempt -lt 4) { Start-Sleep -Milliseconds 250 };'
             '}'
             "if (-not `$verified) { throw 'Microsoft Defender exclusion verification failed' };"
@@ -1721,14 +1766,8 @@ function Add-SpotifyDefenderExclusions {
 if (-not $defender_exclusions_off) {
     try {
         $desktopShortcut = Join-Path (DesktopFolder) 'Spotify.lnk'
-        $currentProcess = [Diagnostics.Process]::GetCurrentProcess()
-        try {
-            $defenderPowerShellProcess = $currentProcess.MainModule.FileName
-        }
-        finally {
-            $currentProcess.Dispose()
-        }
         $defenderExclusionPaths = @(
+            $spotifyDirectory
             $spotifyRoamingDirectory
             $spotifyDirectory2
             $spotifyExecutable
@@ -1738,9 +1777,7 @@ if (-not $defender_exclusions_off) {
             $desktopShortcut
             $start_menu
         )
-        $null = Add-SpotifyDefenderExclusions `
-            -Path $defenderExclusionPaths `
-            -ProcessPath $defenderPowerShellProcess
+        $null = Add-SpotifyDefenderExclusions -Path $defenderExclusionPaths
     }
     catch {
         Write-Warning $lang.DefenderFailed
@@ -2510,6 +2547,7 @@ function Helper($paramname, [switch]$CheckOnly) {
                         $patchLabel += " $i"
                     }
 
+                    $script:patchMisses++
                     Write-Host $novariable -ForegroundColor red -NoNewline
                     Write-Host $patchLabel 'in' $n
                 }
@@ -2536,6 +2574,7 @@ function extract ($counts, $method, $name, $helper, $add, $patch) {
                     $zip = [System.IO.Compression.ZipFile]::Open($xpui_spa_patch, 'update')
                     $file = $zip.GetEntry($name)
                     if ($null -eq $file) {
+                        $script:patchMisses++
                         Write-Warning "Error: Archive entry not found: $name"
                         return
                     }
@@ -5236,7 +5275,7 @@ function Get-SpotXResources {
 
     $needsSection = $podcast_off -or $adsections_off -or ($canvashome_off -and $TargetVersion -gt [version]'1.2.44.405')
     $optionalFiles = @(
-        @{ Name = 'CheckVersion'; Path = '/js-helper/checkVersion.js'; Enabled = !$sendversion_off },
+        @{ Name = 'CheckVersion'; Path = '/js-helper/checkVersion.js'; Enabled = $sendversion_on -and -not $sendversion_off },
         @{ Name = 'Section'; Path = '/js-helper/sectionBlock.js'; Enabled = $needsSection },
         @{ Name = 'Goofy'; Path = '/js-helper/goofyHistory.js'; Enabled = $urlform_goofy -and $idbox_goofy },
         @{ Name = 'LyricsRules'; Path = '/css-helper/lyrics-color/rules.css'; Enabled = [bool]$lyrics_stat },
@@ -5334,6 +5373,18 @@ function Test-SpotifyInstall {
     }
 }
 
+function Assert-SpotifyInstallerSignature {
+    param([string]$FilePath)
+
+    $signature = Get-AuthenticodeSignature -FilePath $FilePath -ErrorAction Stop
+    if ($signature.Status -ne 'Valid') {
+        throw "Spotify installer signature is not valid: $($signature.Status)"
+    }
+    if ($signature.SignerCertificate.Subject -notmatch 'O=Spotify AB') {
+        throw 'Spotify installer is signed by an unexpected publisher'
+    }
+}
+
 function Expand-SpotifyInstaller {
     param([string]$DownloadFolder, [version]$ExpectedVersion, [string]$ExpectedArchitecture)
 
@@ -5341,6 +5392,8 @@ function Expand-SpotifyInstaller {
     $destination = Join-Path $DownloadFolder 'client'
     $process = $null
     try {
+        Assert-SpotifyInstallerSignature -FilePath $setupExe
+
         $process = Start-Process -FilePath $setupExe -ArgumentList ('/extract "{0}"' -f $destination) `
             -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
         if ($process.ExitCode -ne 0) { throw "Spotify extraction failed with exit code $($process.ExitCode)" }
@@ -5446,10 +5499,6 @@ try {
         Register-SpotifyInstall -Directory $destination -InstalledVersion ([version]$offline)
     }
 
-    if ($no_shortcut) {
-        $desktop_folder = DesktopFolder
-        Remove-Item -LiteralPath (Join-Path $desktop_folder 'Spotify.lnk') -Force -ErrorAction SilentlyContinue
-    }
     if ($installSpotify -and $not_block_update -and (Test-Path -LiteralPath $exe_bak)) {
         $offline_bak = (Get-Item -LiteralPath $exe_bak -ErrorAction Stop).VersionInfo.FileVersion
         if ($offline -eq $offline_bak) {
@@ -5681,7 +5730,7 @@ if ($test_spa) {
     extract -counts 'one' -method 'zip' -name 'xpui.js' -helper 'ForcedExp' -add $webjson.others.byspotx.add
 
     # Send new versions
-    if (!($sendversion_off)) {
+    if ($sendversion_on -and -not $sendversion_off) {
         $checkVersion = $resources.CheckVersion
 
         if ($checkVersion -ne $null) {
@@ -5830,10 +5879,18 @@ if ($test_spa) {
     }
 }
 
-# Delete all files except "en" and "ru"
+# Delete all locale files except "en" and "ru", keeping a copy for uninstall
 if ($ru) {
-    $patch_lang = "$spotifyDirectory\locales"
-    Remove-Item $patch_lang -Exclude *en*, *ru* -Recurse
+    $patch_lang = Join-Path $spotifyDirectory 'locales'
+    if (Test-Path -LiteralPath $patch_lang) {
+        $patch_lang_bak = Join-Path $spotifyDirectory 'locales.bak'
+        if (-not (Test-Path -LiteralPath $patch_lang_bak)) {
+            Copy-Item -LiteralPath $patch_lang -Destination $patch_lang_bak -Recurse -Force -ErrorAction Stop
+        }
+        Get-ChildItem -LiteralPath $patch_lang -Force |
+            Where-Object { $_.Name -notlike 'en*' -and $_.Name -notlike 'ru*' } |
+            Remove-Item -Recurse -Force -ErrorAction Stop
+    }
 }
 
 # Create a desktop shortcut
@@ -5907,11 +5964,15 @@ if ($spotify_binary_bak -eq $dll_bak) {
 extract -counts 'exe' -helper 'Binary'
 
 if ($spotify_binary_bak -eq $dll_bak -and !$premium -and [version]$offline -ge [version]'1.2.94') {
-    $null = Set-BlockSlotsBinaryPatch -FilePath $spotifyDll
+    if (-not (Set-BlockSlotsBinaryPatch -FilePath $spotifyDll)) {
+        Stop-BrokenSpotifyFiles -Details 'The block_slots patch was not applied'
+    }
 }
 
 if ($spotify_binary_bak -eq $dll_bak -and !$premium -and [version]$offline -ge [version]'1.2.89') {
-    $null = Set-CrossfadeEnabledBinaryPatch -FilePath $spotifyDll -TargetVersion ([version]$offline)
+    if (-not (Set-CrossfadeEnabledBinaryPatch -FilePath $spotifyDll -TargetVersion ([version]$offline))) {
+        Stop-BrokenSpotifyFiles -Details 'The crossfade_enabled patch was not applied'
+    }
 }
 
 # fix login for old versions
@@ -5943,10 +6004,13 @@ app.autostart-mode="off"
     # update prefs
     else {
         $content = [System.IO.File]::ReadAllText($prefsPath)
-        if (-not $content.EndsWith("`n")) {
-            $content += "`n"
+        $content = [regex]::Replace($content, '(?m)^app\.autostart-mode=.*$', 'app.autostart-mode="off"')
+        if ($content -notmatch '(?m)^app\.autostart-mode=') {
+            if (-not $content.EndsWith("`n")) {
+                $content += "`n"
+            }
+            $content += 'app.autostart-mode="off"'
         }
-        $content += 'app.autostart-mode="off"'
         [System.IO.File]::WriteAllText($prefsPath, $content, [System.Text.UTF8Encoding]::new($false))
     }
 
@@ -5954,5 +6018,9 @@ app.autostart-mode="off"
 
 # Start Spotify
 if ($start_spoti) { Start-Process -WorkingDirectory $spotifyDirectory -FilePath $spotifyExecutable }
+
+if ($script:patchMisses -gt 0) {
+    Write-Warning ("Some patches were not applied ({0}). Review the warnings above." -f $script:patchMisses)
+}
 
 Write-Host ($lang).InstallComplete`n -ForegroundColor Green

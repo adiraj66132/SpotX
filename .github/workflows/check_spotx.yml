@@ -28,7 +28,7 @@ jobs:
           $resp = Invoke-RestMethod -Uri $jsonUrl
 
           # Use fullversion for the installer name
-          $latestEntry = $resp.PSObject.Properties | Select-Object -First 1
+          $latestEntry = $resp.PSObject.Properties | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
           if (-not $latestEntry) {
             throw "No Spotify versions found in $jsonUrl"
           }
@@ -48,6 +48,7 @@ jobs:
         $parameters = @{
           Verbose = $true
           no_pause = $true
+          defender_exclusions_off = $true
           new_theme = $true
           version = $spotifyVersion
           confirm_spoti_recomended_over = $true

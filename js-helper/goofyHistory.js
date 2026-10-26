@@ -53,9 +53,10 @@ async function sendToGoogleForm(uri, urlForm, idBox) {
             "method": "POST",
             "mode": "no-cors",
         });
-        saveTracksToStorage(unique);
+        return true;
     } catch (error) {
         console.error('Error sending uri to google form:', error);
+        return false;
     }
 }
 
@@ -63,6 +64,10 @@ const goofyHistory = debounce(async (e, urlForm, idBox) => {
     const uri = e?.item?.uri;
     if (uri && uri.includes('spotify:track:') && !unique.has(uri)) {
         unique.add(uri);
-        await sendToGoogleForm(uri, urlForm, idBox);
+        if (await sendToGoogleForm(uri, urlForm, idBox)) {
+            saveTracksToStorage(unique);
+        } else {
+            unique.delete(uri);
+        }
     }
 }, MAX_DELAY);

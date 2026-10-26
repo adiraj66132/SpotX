@@ -220,16 +220,8 @@
   }
 
   function readClientContext(state) {
-    const nav = window.navigator || {};
     return {
       scriptVersion: SCRIPT_VERSION,
-      userAgent: state.versionSources.userAgent || nav.userAgent || "",
-      platform: nav.platform || "",
-      language: nav.language || "",
-      languages: Array.isArray(nav.languages) ? nav.languages.slice(0, 5) : [],
-      clientInformationAppVersion: state.versionSources.clientInformationAppVersion,
-      navigatorAppVersion: state.versionSources.navigatorAppVersion,
-      "real-version": state.versionSources.realVersion,
       spotifyAppVersion: state.spotifyAppVersion,
       sourceLabel: state.sourceLabel,
       latestJsonVersion: state.sourceLabel === SOURCE_LABELS.REMOTE ? state.remoteShortVersion : "",
@@ -237,13 +229,12 @@
     };
   }
 
-  function readRequestMeta(state, extra = {}) {
+  function readRequestMeta(state) {
     return {
       source: "spotify-client-script",
       timestamp: nowIso(),
       hasAuthorization: Boolean(state.token),
-      headers: { "spotify-app-version": state.spotifyAppVersion },
-      ...extra
+      headers: { "spotify-app-version": state.spotifyAppVersion }
     };
   }
 
@@ -258,10 +249,8 @@
       queryFullVersion: state.queryFullVersion || null,
       detectedShortVersion: state.targetShortVersion || null,
       detectedFullVersion: state.targetFullVersion || null,
-      requestDurationMs: Math.max(0, Date.now() - state.startedAtMs),
       checkedPlatforms: PLATFORM_CODES,
       foundPlatforms: Object.keys(state.platforms),
-      failures: state.failures,
       ...extra
     };
   }
@@ -323,7 +312,6 @@
     for (const [code, asset] of Object.entries(platforms)) {
       if (!asset) continue;
       payload[code] = {
-        url: asset.url,
         shortVersion: asset.shortVersion,
         fullVersion: asset.fullVersion,
         normalizedAssetName: asset.normalizedAssetName
@@ -499,12 +487,10 @@
       shortVersion: versions.shortVersion,
       fullVersion: versions.fullVersion,
       message: extra.message || ERROR_MESSAGES[kind] || "Unexpected error.",
-      stack: extra.stack || "",
       partialPlatforms: buildPlatformPayload(state.platforms),
       clientContext: readClientContext(state),
-      requestMeta: readRequestMeta(state, extra.requestMeta),
-      diagnostics: readDiagnostics(state, "error", extra.diagnostics),
-      rawPayload: extra.rawPayload
+      requestMeta: readRequestMeta(state),
+      diagnostics: readDiagnostics(state, "error", extra.diagnostics)
     });
   }
 
@@ -714,26 +700,6 @@
     };
   }
 
-  function buildForensicRawPayload(state) {
-    return {
-      desktopUpdateResponses: state.desktopUpdateResponses.map((item) => ({
-        platform: item.platform,
-        attempts: Array.isArray(item.attempts) ? item.attempts.map((attempt) => ({ ...attempt })) : [],
-        finalOutcome: item.finalOutcome,
-        finalUrl: item.finalUrl || null,
-        status: item.status ?? null,
-        headers: item.headers && typeof item.headers === "object" ? { ...item.headers } : {},
-        contentType: item.contentType || null,
-        contentLength: item.contentLength || null,
-        byteLength: item.byteLength ?? null,
-        bodyLatin1: item.bodyLatin1 || null,
-        extractedUpgradeLink: item.extractedUpgradeLink || "",
-        parseErrorMessage: item.parseErrorMessage || null,
-        requestErrors: Array.isArray(item.requestErrors) ? item.requestErrors.slice() : []
-      }))
-    };
-  }
-
   async function collectPlatformResult(state, platform) {
     const attempts = [];
     const requestErrors = [];
@@ -803,8 +769,7 @@
     sendError(state, "desktop_update_parse_error", {
       phase: "desktop_update_parse_error",
       message: ERROR_MESSAGES.desktop_update_parse_error,
-      diagnostics: buildForensicDiagnostics(state),
-      rawPayload: buildForensicRawPayload(state)
+      diagnostics: buildForensicDiagnostics(state)
     });
   }
 
@@ -956,8 +921,7 @@
           const state = createState(token);
           sendError(state, "uncaught", {
             phase: "uncaught_runOnce",
-            message: error?.message || String(error),
-            stack: error?.stack || ""
+            message: error?.message || String(error)
           });
         });
       } else if (tokenCaptureAttempts >= CONFIG.tokenCaptureMaxAttempts) {
